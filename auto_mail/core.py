@@ -6,6 +6,8 @@ from typing import Optional
 import re
 import pandas as pd
 import docx
+import os
+
 class AutoMailer:
     """Class to send emails using SMTP."""
     def __init__(self, username: str, password: str, smtp_server: Optional[str]=None, smtp_port: Optional[int] = 587):
@@ -74,23 +76,32 @@ class AutoMailer:
         except Exception as e:
             raise RuntimeError(f"Could not resolve MX records for domain {domain}: {e}")
     
-    def _render_template(self, template_path: str, replace_columns: dict) -> str:
+    def _render_template(self, row_data: dict) -> str:
         """
-        Function to render a docx template with the provided data.
-        Args:
-            template_path (str): Path to the docx template file.
-            replace_columns (dict): Dictionary with column names as keys and their values to replace in the template.
-        Returns:
-            str: The rendered body of the email.
+        Render the docx template by replacing placeholders {{ column_name }} with actual data.
+        Returns final plain text message.
         """
-        doc = docx.Document(template_path)
+        doc = docx.Document(self.template_path)
+        placeholder_pattern = re.compile(r"\{\{\s*(\w+)\s*\}\}")
+
         for paragraph in doc.paragraphs:
-            for key, value in replace_columns.items():
-                if key in paragraph.text:
-                    paragraph.text = paragraph.text.replace(key, str(value))
+            full_text = "".join(run.text for run in paragraph.runs)
+            matches = placeholder_pattern.findall(full_text)
+            
+            if matches:
+                for match in matches:
+                    if match in row_data:
+                        full_text = re.sub(r"\{\{\s*" + re.escape(match) + r"\s*\}\}", str(row_data[match]), full_text)
+
+                # Clear all runs in paragraph
+                for run in paragraph.runs:
+                    run.text = ""
+
+                # Add a single new run with replaced text (you can also style it if needed)
+                paragraph.runs[0].text = full_text
+
+        return "\n".join(paragraph.text for paragraph in doc.paragraphs)
         
-        return '\n'.join(paragraph.text for paragraph in doc.paragraphs)
-    
     def send_mail(self, to_address: str, subject: str, body: str) -> bool:
         """
             Function to send an email.
@@ -133,25 +144,21 @@ class BulkMailer(AutoMailer):
     def __init__(self, username: str, password: str, csv_path: str, smtp_server: Optional[str]=None, smtp_port: Optional[int] = 587, template_path: Optional[str]=None):
         super().__init__(username, password, smtp_server, smtp_port)
         self.csv_path = csv_path
-        self.template_path = template_path
+        self.template_path = os.path.abspath(template_path) if template_path else None
     
-    def bulk_mail_with_message(self, 
-                  mail_to_column: str, 
-                  subject_column: Optional[str]=None, 
-                  body_column: Optional[str]=None,
-                  template_path: Optional[str]=None, 
-                  subject: Optional[str]=None):
+    def bulk_mail(self, 
+              mail_to_column: str, 
+              subject_column: Optional[str]=None, 
+              body_column: Optional[str]=None,
+              subject: Optional[str]=None):
         """
-        Function to send bulk emails using columns or docx template.
-
+        Send bulk emails using columns or docx template.
         Args:
             mail_to_column (str): Column with recipient emails.
             subject_column (str): Column with subject (if not using template).
             body_column (str): Column with body (if not using template).
-            template_path (str): Path to docx file template (optional).
-            subject (str): Subject to use when using template.
+            subject (str): Subject to use when using template (if no subject column).
         """
-
         if self.csv_path.endswith('.csv'):
             df = pd.read_csv(self.csv_path)
         elif self.csv_path.endswith('.xlsx'):
@@ -161,15 +168,22 @@ class BulkMailer(AutoMailer):
 
         for _, row in df.iterrows():
             to_address = row[mail_to_column]
-            subject = row[subject_column]
-            body = row[body_column]
-            if template_path:
-                replace_columns = {col: row[col] for col in df.columns if col not in [mail_to_column, subject_column, body_column]}
-                body = self._render_template(template_path, replace_columns)
-                if subject is None:
-                    subject = f"Notification for {to_address}"
-                
-                self.send_mail(to_address, subject, body)
+
+            # When using template
+            if self.template_path:
+                # Render email body from template using row
+                body = self._render_template(row)
+
+                # Subject: either from column or passed subject argument
+                if subject_column and subject_column in row:
+                    email_subject = row[subject_column]
+                else:
+                    email_subject = subject if subject else f"Notification for {row.get('Name', to_address)}"
+
+                self.send_mail(to_address, email_subject, body)
+
+            # When NOT using template
             else:
-                self.send_mail(to_address, subject, body)
-        
+                email_subject = row[subject_column] if subject_column else subject
+                body = row[body_column] if body_column else ""
+                self.send_mail(to_address, email_subject, body)
