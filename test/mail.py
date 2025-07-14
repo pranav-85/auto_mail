@@ -1,6 +1,12 @@
 from auto_mail import AutoMailer
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
 
 mailer = AutoMailer(
+    username=os.getenv("MAIL_ID"),
+    password=os.getenv("PASSWORD"),
     smtp_server="smtp.gmail.com",
     smtp_port=587
 )
